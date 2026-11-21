@@ -17,15 +17,90 @@ import re
 import pandas as pd
 import streamlit as st
 
+from datetime import date
+from difflib import SequenceMatcher
+import json
+import os
+import re
+import pandas as pd
+import streamlit as st
+
 # ==========================================
-# CampusMatch V5 - Streamlit 網頁版
+# CampusMatch V5 - 精緻版 UI
 # 校園失物招領智慧媒合系統
 # ==========================================
 
 st.set_page_config(
-    page_title="CampusMatch V5 校園失物招領系統",
+    page_title="國立彰化師範大學校園失物招領系統",
     page_icon="🔍",
     layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# 輕量自訂樣式：美化卡片、標籤與留白
+st.markdown(
+    """
+    <style>
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2.5rem;
+        }
+        .hero-banner {
+            background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+            color: #ffffff;
+            padding: 1.35rem 1.6rem;
+            border-radius: 14px;
+            margin-bottom: 1.2rem;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+        }
+        .hero-banner h1 {
+            color: #ffffff !important;
+            font-size: 1.65rem !important;
+            margin: 0 0 0.35rem 0 !important;
+            padding: 0 !important;
+        }
+        .hero-banner p {
+            color: #dbeafe;
+            margin: 0;
+            font-size: 0.95rem;
+        }
+        .badge-high {
+            display: inline-block;
+            background: #dcfce7;
+            color: #166534;
+            font-weight: 600;
+            padding: 0.2rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.82rem;
+        }
+        .badge-mid {
+            display: inline-block;
+            background: #fef9c3;
+            color: #854d0e;
+            font-weight: 600;
+            padding: 0.2rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.82rem;
+        }
+        .badge-low {
+            display: inline-block;
+            background: #ffedd5;
+            color: #9a3412;
+            font-weight: 600;
+            padding: 0.2rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.82rem;
+        }
+        .compare-box {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 0.75rem 0.95rem;
+            margin-top: 0.5rem;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 DATA_FILE = "campusmatch.json"
@@ -64,50 +139,48 @@ FEATURE_NAMES = {
     "description": "物品描述",
 }
 
+STATUS_LABELS = {
+    "open": "開放中／尋找中",
+    "claimed": "已領回",
+    "closed": "已結案",
+}
+
 
 # ==========================================
 # 第一組：文字與日期處理模組
 # ==========================================
 
 def normalize_text(value):
-    """標準化文字並移除空白。"""
     if not isinstance(value, str):
         return ""
     return re.sub(r"\s+", "", value.strip().casefold())
 
 
 def text_similarity(a, b):
-    """缺失資料回傳 None，不列入權重計算。"""
     a = normalize_text(a)
     b = normalize_text(b)
-
     if not a or not b:
         return None
     if a == b:
         return 1.0
     if a in b or b in a:
         return 0.9
-
     return SequenceMatcher(None, a, b).ratio()
 
 
 def parse_date(value):
-    """嚴格驗證 YYYY-MM-DD 日期格式。"""
     if not isinstance(value, str):
         raise ValueError("日期必須是 YYYY-MM-DD 格式")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         raise ValueError("日期格式必須是 YYYY-MM-DD")
-
     try:
         parsed = date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError("日期不存在") from exc
-
     if parsed.isoformat() != value:
         raise ValueError("日期格式不正確")
     if parsed > date.today():
         raise ValueError("日期不能晚於今天")
-
     return parsed
 
 
@@ -117,17 +190,15 @@ def date_similarity(a, b):
         d2 = parse_date(b)
     except (ValueError, TypeError):
         return None
-
     days = abs((d1 - d2).days)
     return max(0.0, 1.0 - days / 30.0)
 
 
 # ==========================================
-# 第二組：智慧媒合模組
+# 第二組：智慧媒合與卡片渲染模組
 # ==========================================
 
 def match_items(lost, found):
-    """依照雙方都有提供的特徵計算媒合分數。"""
     features = {
         "name": text_similarity(lost.get("name"), found.get("name")),
         "category": (
@@ -144,7 +215,6 @@ def match_items(lost, found):
     available_weight = sum(
         WEIGHTS[key] for key, value in features.items() if value is not None
     )
-
     if available_weight == 0:
         return 0, ["沒有足夠資料進行比對"], features
 
@@ -157,51 +227,43 @@ def match_items(lost, found):
         raw_score = min(raw_score, 0.49)
 
     score = round(raw_score * 100)
-
     reasons = [
         LABELS[key]
         for key, value in features.items()
         if value is not None and value >= 0.65
     ]
-
     if not reasons:
         reasons = ["沒有明顯相符特徵，建議人工確認"]
 
     return score, reasons, features
 
 
-def get_match_results(lost, candidates):
-    """計算並排序所有達到門檻的媒合結果。"""
-    open_candidates = [
-        item for item in candidates if item.get("status") == "open"
-    ]
-
+def get_match_results(lost, candidates, min_score=MIN_SCORE):
+    open_candidates = [item for item in candidates if item.get("status") == "open"]
     results = []
     for found in open_candidates:
         score, reasons, features = match_items(lost, found)
-        if score >= MIN_SCORE:
+        if score >= min_score:
             results.append({
                 "item": found,
                 "score": score,
                 "reasons": reasons,
                 "features": features,
             })
-
     results.sort(key=lambda x: x["score"], reverse=True)
     return results, len(open_candidates)
 
 
-def render_matches_ui(lost, candidates):
-    """在網頁上呈現智慧媒合結果。"""
-    st.subheader("智慧媒合結果")
-    results, open_count = get_match_results(lost, candidates)
+def render_matches_ui(lost, candidates, min_score=MIN_SCORE, on_claim_callback=None):
+    st.subheader("🎯 智慧媒合結果")
+    results, open_count = get_match_results(lost, candidates, min_score=min_score)
 
     if open_count == 0:
         st.info("目前沒有開放中的拾獲物可以比對。")
         return
 
     if not results:
-        st.warning(f"目前沒有達到 {MIN_SCORE} 分的媒合結果。")
+        st.warning(f"目前沒有達到 {min_score} 分的媒合結果，可嘗試調低分數門檻或補充物品描述。")
         return
 
     for rank, result in enumerate(results, 1):
@@ -209,52 +271,62 @@ def render_matches_ui(lost, candidates):
         score = result["score"]
 
         if score >= 80:
-            verdict = "高度符合，建議優先人工確認"
-            badge = "🟢"
+            badge_html = '<span class="badge-high">高度符合・建議優先確認</span>'
         elif score >= 60:
-            verdict = "可能符合，建議進一步確認"
-            badge = "🟡"
+            badge_html = '<span class="badge-mid">可能符合・建議進一步核對</span>'
         else:
-            verdict = "部分特徵相似"
-            badge = "🟠"
+            badge_html = '<span class="badge-low">部分相似・人工確認</span>'
 
         with st.container(border=True):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.markdown(f"### {badge} 第 {rank} 名：{found['name']}")
-                st.write(
-                    f"**類別：** {found['category']} ｜ "
-                    f"**顏色：** {found.get('color') or '未提供'} ｜ "
-                    f"**地點：** {found['location']} ｜ "
-                    f"**日期：** {found['date']}"
-                )
-                if found.get("description"):
-                    st.write(f"**描述：** {found['description']}")
-                st.write("**推薦理由：** " + "、".join(result["reasons"]))
+            top_left, top_right = st.columns([3.5, 1.3])
 
-            with col2:
-                st.metric("相似度分數", f"{score} / 100")
-                st.caption(verdict)
+            with top_left:
+                st.markdown(f"#### #{rank} {found['name']} &nbsp; {badge_html}", unsafe_allow_html=True)
+                st.caption(f"類別：{found['category']} | 拾獲地點：{found['location']} | 日期：{found['date']}")
+                st.markdown("**推薦理由：** " + "、".join(result["reasons"]))
 
-            with st.expander("查看各項特徵比對明細"):
-                detail_rows = [
-                    {
-                        "特徵項目": FEATURE_NAMES[key],
-                        "相似度": "未提供" if val is None else f"{val * 100:.1f}%",
-                    }
-                    for key, val in result["features"].items()
-                ]
-                st.table(pd.DataFrame(detail_rows))
+            with top_right:
+                st.metric("媒合分數", f"{score} / 100")
+                st.progress(min(max(score / 100, 0.0), 1.0))
 
-    st.caption("提醒：媒合分數僅供參考，仍須人工確認。")
+            st.markdown(
+                f"""
+                <div class="compare-box">
+                    <strong>欄位對照：</strong><br>
+                    • <b>顏色</b>：遺失「{lost.get('color') or '未填'}」 vs. 拾獲「{found.get('color') or '未填'}」<br>
+                    • <b>地點</b>：遺失「{lost.get('location') or '未填'}」 vs. 拾獲「{found.get('location') or '未填'}」<br>
+                    • <b>描述</b>：遺失「{lost.get('description') or '無'}」 vs. 拾獲「{found.get('description') or '無'}」
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                with st.expander("展開各特徵相似度明細"):
+                    detail_rows = [
+                        {
+                            "特徵項目": FEATURE_NAMES[key],
+                            "權重": f"{int(WEIGHTS[key] * 100)}%",
+                            "相似度": "未提供" if val is None else f"{val * 100:.1f}%",
+                        }
+                        for key, val in result["features"].items()
+                    ]
+                    st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+            with col_b:
+                if on_claim_callback is not None:
+                    if st.button("標記為已領回", key=f"claim_{rank}_{found['name']}_{found['date']}", use_container_width=True):
+                        on_claim_callback(found)
+
+    st.caption("提醒：媒合分數僅供參考，領回前仍須由管理人員或當事人核對細節。")
 
 
 # ==========================================
-# 第三組：資料讀寫與驗證模組
+# 第三組：資料讀寫、表單與表格模組
 # ==========================================
 
 def is_duplicate(item, items):
-    """檢查是否已經有相同資料。"""
     fields = ["name", "category", "color", "location", "date", "description"]
     return any(
         all(
@@ -266,20 +338,15 @@ def is_duplicate(item, items):
 
 
 def load_data():
-    """從 JSON 載入資料，並回傳 (found_items, lost_items, error_msg)。"""
     if not os.path.exists(DATA_FILE):
         return [], [], None
-
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
-
         if not isinstance(data, dict):
             raise ValueError("資料格式錯誤")
-
         found = data.get("found_items", [])
         lost = data.get("lost_items", [])
-
         if not isinstance(found, list) or not isinstance(lost, list):
             raise ValueError("物品清單格式錯誤")
 
@@ -287,7 +354,6 @@ def load_data():
             "name", "category", "color",
             "location", "date", "description", "status"
         }
-
         for item in found + lost:
             if (
                 not isinstance(item, dict)
@@ -295,27 +361,22 @@ def load_data():
                 or not all(isinstance(item[key], str) for key in required_fields)
             ):
                 raise ValueError("物品資料格式錯誤")
-
             valid_statuses = {"open", "claimed", "closed"} if item in found else {"open", "closed"}
             if item["status"] not in valid_statuses:
                 raise ValueError("物品狀態錯誤")
-
             parse_date(item["date"])
 
         return found, lost, None
-
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
         return [], [], f"資料載入失敗：{exc}（請檢查 {DATA_FILE}，避免覆蓋原始資料）"
 
 
 def save_data(found_items, lost_items):
-    """將資料保存至 JSON 檔案。"""
     data = {
         "found_items": found_items,
         "lost_items": lost_items,
     }
     temp_file = DATA_FILE + ".tmp"
-
     try:
         with open(temp_file, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=4)
@@ -326,22 +387,40 @@ def save_data(found_items, lost_items):
 
 
 def render_item_form(kind):
-    """渲染登記表單並回傳驗證後的物品字典（未送出或驗證失敗回傳 None）。"""
-    title = "登記撿到的物品（拾獲物）" if kind == "found" else "登記遺失的物品（遺失物）"
+    title = "📥 登記撿到的物品（拾獲物）" if kind == "found" else "📤 登記遺失的物品（遺失物）"
     st.subheader(title)
 
     with st.form(key=f"form_{kind}", clear_on_submit=False):
         col1, col2 = st.columns(2)
         with col1:
-            name = st.text_input("物品名稱 *", max_chars=MAX_TEXT_LENGTH, placeholder="例如：黑色摺疊傘、AirPods Pro")
+            name = st.text_input(
+                "物品名稱 *",
+                max_chars=MAX_TEXT_LENGTH,
+                placeholder="例如：黑色摺疊傘、iPad、學生證",
+                help="必填，越具體越容易比對成功",
+            )
             category = st.selectbox("物品類別 *", CATEGORIES)
-            color = st.text_input("物品顏色（選填）", max_chars=MAX_TEXT_LENGTH, placeholder="例如：黑色、銀白色")
+            color = st.text_input(
+                "物品顏色（選填）",
+                max_chars=MAX_TEXT_LENGTH,
+                placeholder="例如：黑色、透明、銀色",
+            )
         with col2:
-            location = st.text_input("遺失／拾獲地點 *", max_chars=MAX_TEXT_LENGTH, placeholder="例如：圖書館二樓、學餐")
+            location = st.text_input(
+                "遺失／拾獲地點 *",
+                max_chars=MAX_TEXT_LENGTH,
+                placeholder="例如：圖書館三樓、綜合大樓、操場",
+                help="必填，建議填寫建築物與樓層或區域",
+            )
             item_date = st.date_input("日期 *", value=date.today(), max_value=date.today())
-            description = st.text_area("其他特徵或描述（選填）", max_chars=MAX_TEXT_LENGTH, height=68)
+            description = st.text_area(
+                "其他特徵或描述（選填）",
+                max_chars=MAX_TEXT_LENGTH,
+                height=72,
+                placeholder="例如：有貼貼紙、保護殼有刮痕、附吊飾",
+            )
 
-        submitted = st.form_submit_button("送出登記", type="primary")
+        submitted = st.form_submit_button("送出登記", type="primary", use_container_width=True)
 
     if not submitted:
         return None
@@ -377,29 +456,52 @@ def render_item_form(kind):
 
 
 def render_items_table(items, empty_msg):
-    """以網頁表格顯示物品清單。"""
     if not items:
         st.info(empty_msg)
         return
 
-    status_filter = st.selectbox(
-        "篩選狀態",
-        ["全部", "open（尚未領回／尋找中）", "claimed（已領回）", "closed（已結案）"],
-        key=f"filter_{empty_msg}",
-    )
+    c1, c2, c3 = st.columns([1.4, 1.4, 2.2])
+    with c1:
+        status_filter = st.selectbox(
+            "狀態篩選",
+            ["全部", "open", "claimed", "closed"],
+            format_func=lambda s: "全部狀態" if s == "全部" else f"{s}（{STATUS_LABELS.get(s, s)}）",
+            key=f"status_{empty_msg}",
+        )
+    with c2:
+        cat_filter = st.selectbox(
+            "類別篩選",
+            ["全部"] + CATEGORIES,
+            key=f"cat_{empty_msg}",
+        )
+    with c3:
+        keyword = st.text_input(
+            "關鍵字搜尋",
+            placeholder="搜尋名稱、地點或描述...",
+            key=f"kw_{empty_msg}",
+        )
 
-    filtered = items
-    if status_filter != "全部":
-        target_status = status_filter.split("（")[0]
-        filtered = [item for item in items if item.get("status") == target_status]
+    kw_norm = normalize_text(keyword)
+    filtered = []
+    for item in items:
+        if status_filter != "全部" and item.get("status") != status_filter:
+            continue
+        if cat_filter != "全部" and item.get("category") != cat_filter:
+            continue
+        if kw_norm:
+            haystack = normalize_text(
+                f"{item.get('name', '')} {item.get('location', '')} {item.get('description', '')} {item.get('color', '')}"
+            )
+            if kw_norm not in haystack:
+                continue
+        filtered.append(item)
 
     if not filtered:
-        st.info("目前沒有符合該狀態的資料。")
+        st.info("沒有符合篩選條件的資料。")
         return
 
-    rows = []
-    for idx, item in enumerate(filtered, 1):
-        rows.append({
+    rows = [
+        {
             "編號": idx,
             "物品名稱": item.get("name", "未命名"),
             "類別": item.get("category", "未分類"),
@@ -407,10 +509,13 @@ def render_items_table(items, empty_msg):
             "地點": item.get("location", "未提供"),
             "日期": item.get("date", "未提供"),
             "描述": item.get("description") or "無",
-            "狀態": item.get("status", "open"),
-        })
+            "狀態": f"{item.get('status', 'open')}（{STATUS_LABELS.get(item.get('status', 'open'), '')}）",
+        }
+        for idx, item in enumerate(filtered, 1)
+    ]
 
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(f"顯示 {len(filtered)} / {len(items)} 筆資料")
 
 
 # ==========================================
@@ -418,17 +523,37 @@ def render_items_table(items, empty_msg):
 # ==========================================
 
 def main():
-    st.title("🔍 CampusMatch V5 校園失物招領智慧媒合系統")
-
     found_items, lost_items, load_err = load_data()
+
+    st.markdown(
+        """
+        <div class="hero-banner">
+            <h1>🔍 國立彰化師範大學校園失物招領系統</h1>
+            <p>快速登記遺失物與拾獲物，依名稱、類別、顏色、地點、日期與描述進行多維度相似度媒合</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if load_err:
         st.error(load_err)
 
-    # 側邊欄導覽與即時統計
+    open_found = sum(1 for i in found_items if i.get("status") == "open")
+    open_lost = sum(1 for i in lost_items if i.get("status") == "open")
+    claimed_count = sum(1 for i in found_items if i.get("status") == "claimed")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("開放中拾獲物", f"{open_found} 筆")
+    m2.metric("尋找中遺失物", f"{open_lost} 筆")
+    m3.metric("已領回拾獲物", f"{claimed_count} 筆")
+    m4.metric("媒合推薦門檻", f"{MIN_SCORE} 分")
+
+    st.divider()
+
     with st.sidebar:
-        st.header("功能選單")
+        st.header("功能導覽")
         menu = st.radio(
-            "請選擇操作項目：",
+            "選擇操作項目",
             [
                 "1. 登記撿到的物品",
                 "2. 登記遺失的物品並立即媒合",
@@ -441,12 +566,31 @@ def main():
             ],
         )
         st.divider()
-        open_found = sum(1 for i in found_items if i.get("status") == "open")
-        open_lost = sum(1 for i in lost_items if i.get("status") == "open")
-        st.metric("開放中拾獲物", f"{open_found} 筆")
-        st.metric("尋找中遺失物", f"{open_lost} 筆")
+        min_score_slider = st.slider(
+            "最低顯示媒合分數",
+            min_value=0,
+            max_value=100,
+            value=MIN_SCORE,
+            step=5,
+            help="調整媒合結果卡片的最低顯示分數",
+        )
+        with st.expander("查看權重與規則"):
+            for k, w in WEIGHTS.items():
+                st.write(f"- {FEATURE_NAMES[k]}：{int(w * 100)}%")
+            st.caption("有效特徵少於 3 項時，分數上限為 49 分。")
 
-    # 1. 登記撿到的物品
+    def mark_found_claimed(target_item):
+        for f_item in found_items:
+            if f_item is target_item:
+                f_item["status"] = "claimed"
+                break
+        ok, err = save_data(found_items, lost_items)
+        if ok:
+            st.success(f"已將「{target_item.get('name')}」標記為 claimed（已領回）！")
+            st.rerun()
+        else:
+            st.error(err)
+
     if menu == "1. 登記撿到的物品":
         item = render_item_form("found")
         if item:
@@ -462,12 +606,11 @@ def main():
                         st.divider()
                         st.subheader("自動比對現有尋找中的遺失物")
                         for lost in open_lost_list:
-                            st.markdown(f"#### 比對遺失物：{lost['name']}（{lost['date']} @ {lost['location']}）")
-                            render_matches_ui(lost, [item])
+                            st.markdown(f"**比對遺失物：** {lost['name']}（{lost['date']} @ {lost['location']}）")
+                            render_matches_ui(lost, [item], min_score=min_score_slider)
                 else:
                     st.error(err)
 
-    # 2. 登記遺失的物品並立即媒合
     elif menu == "2. 登記遺失的物品並立即媒合":
         item = render_item_form("lost")
         if item:
@@ -479,43 +622,45 @@ def main():
                 if ok:
                     st.success("遺失物登記成功！")
                     st.divider()
-                    render_matches_ui(item, found_items)
+                    render_matches_ui(
+                        item,
+                        found_items,
+                        min_score=min_score_slider,
+                        on_claim_callback=mark_found_claimed,
+                    )
                 else:
                     st.error(err)
 
-    # 3. 查看所有拾獲物
     elif menu == "3. 查看所有拾獲物":
-        st.subheader("所有拾獲物清單")
+        st.subheader("📦 所有拾獲物清單")
         render_items_table(found_items, "目前沒有任何拾獲物資料。")
 
-    # 4. 查看所有遺失物
     elif menu == "4. 查看所有遺失物":
-        st.subheader("所有遺失物清單")
+        st.subheader("📋 所有遺失物清單")
         render_items_table(lost_items, "目前沒有任何遺失物資料。")
 
-    # 5. 修改拾獲物狀態
     elif menu == "5. 修改拾獲物狀態":
-        st.subheader("修改拾獲物狀態")
+        st.subheader("🔄 修改拾獲物狀態")
         if not found_items:
             st.info("目前沒有拾獲物資料可修改。")
         else:
             options = [
-                f"{i + 1}. {item['name']}（{item['category']}｜{item['location']}｜目前狀態：{item['status']}）"
+                f"{i + 1}. {item['name']}（{item['category']}｜{item['location']}｜目前：{item['status']}）"
                 for i, item in enumerate(found_items)
             ]
             selected = st.selectbox("選擇要修改的拾獲物", options)
             idx = options.index(selected)
 
-            status_labels = {
+            status_choices = {
                 "open": "open（尚未領回）",
                 "claimed": "claimed（已經領回）",
                 "closed": "closed（已結案）",
             }
             new_status = st.selectbox(
                 "選擇新狀態",
-                list(status_labels.keys()),
-                index=list(status_labels.keys()).index(found_items[idx]["status"]),
-                format_func=lambda k: status_labels[k],
+                list(status_choices.keys()),
+                index=list(status_choices.keys()).index(found_items[idx]["status"]),
+                format_func=lambda k: status_choices[k],
             )
 
             if st.button("更新狀態", type="primary"):
@@ -527,9 +672,8 @@ def main():
                 else:
                     st.error(err)
 
-    # 6. 刪除拾獲物
     elif menu == "6. 刪除拾獲物":
-        st.subheader("刪除拾獲物")
+        st.subheader("🗑️ 刪除拾獲物")
         if not found_items:
             st.info("目前沒有拾獲物資料可刪除。")
         else:
@@ -550,9 +694,8 @@ def main():
                 else:
                     st.error(err)
 
-    # 7. 刪除遺失物
     elif menu == "7. 刪除遺失物":
-        st.subheader("刪除遺失物")
+        st.subheader("🗑️ 刪除遺失物")
         if not lost_items:
             st.info("目前沒有遺失物資料可刪除。")
         else:
@@ -573,9 +716,8 @@ def main():
                 else:
                     st.error(err)
 
-    # 8. 重新比對現有遺失物（方便隨時查看媒合結果）
     elif menu == "8. 重新比對現有遺失物":
-        st.subheader("選擇已登記的遺失物進行比對")
+        st.subheader("🔁 選擇已登記的遺失物進行比對")
         if not lost_items:
             st.info("目前沒有任何遺失物資料。")
         else:
@@ -585,7 +727,12 @@ def main():
             ]
             selected = st.selectbox("選擇遺失物", options)
             idx = options.index(selected)
-            render_matches_ui(lost_items[idx], found_items)
+            render_matches_ui(
+                lost_items[idx],
+                found_items,
+                min_score=min_score_slider,
+                on_claim_callback=mark_found_claimed,
+            )
 
 
 if __name__ == "__main__":
