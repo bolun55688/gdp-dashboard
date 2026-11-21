@@ -8,6 +8,24 @@
             "date": "2026-11-11",
             "description": "",
             "status": "open"
+        },
+        {
+            "name": "雨傘",
+            "category": "雨傘",
+            "color": "黑色",
+            "location": "進德",
+            "date": "2026-11-20",
+            "description": "很髒",
+            "status": "open"
+        },
+        {
+            "name": "iphone 18 pro",
+            "category": "電子產品",
+            "color": "橘色",
+            "location": "進德",
+            "date": "2026-11-08",
+            "description": "",
+            "status": "open"
         }
     ],
     "lost_items": []
